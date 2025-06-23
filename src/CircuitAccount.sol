@@ -23,6 +23,8 @@ import {IDelegateRegistry} from "./IDelegateRegistry.sol";
 /// 2. Directly on your main EOA (super degen mode).
 /// We shall assume that the bot is willing to foot the gas fees
 /// and willing to call this contract directly.
+/// For simplicity, this account does not depend on app-layer signatures.
+/// There's no EntryPoint, I love you.
 contract CircuitAccount is ERC7821 {
     using DynamicBufferLib for *;
     using DynamicArrayLib for *;
@@ -96,6 +98,7 @@ contract CircuitAccount is ERC7821 {
     // Storage
     ////////////////////////////////////////////////////////////////////////
 
+    /// @dev Holds the storage variables for the account.
     struct AccountStorage {
         /// @dev The address of the master.
         address master;
@@ -162,7 +165,7 @@ contract CircuitAccount is ERC7821 {
 
     /// @dev Initializes the master and the bot. This can only be used once per account.
     /// You can use an ephemeral secp256k1 EOA for this.
-    /// If this account is on a
+    /// If you are using this on a main EOA, you don't need to use this function.
     function initialize(address initialMaster, address initialBot) public virtual {
         if (msg.sender != address(this)) revert Unauthorized();
         AccountStorage storage $ = _getAccountStorage();
@@ -385,6 +388,8 @@ contract CircuitAccount is ERC7821 {
                 continue;
             }
             (bool found, uint256 i) = LibSort.searchSorted(t.erc20s.asAddressArray(), s.token);
+            // `t.erc20s` includes both the spend permissions' and the calldatas'.
+            // so `found` should always be true.
             if (!found) continue;
             _incrementSpent(
                 s,
