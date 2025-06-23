@@ -334,6 +334,8 @@ contract CircuitAccount is ERC7821 {
         uint256 totalNativeSpend;
         for (uint256 i; i < calls.length; ++i) {
             (address target, uint256 value, bytes calldata data) = _get(calls, i);
+            // Don't allow the bot to change the spend limits.
+            if (target == _DELEGATE_REGISTRY_V2) revert Unauthorized();
             if (value != 0) totalNativeSpend += value;
             if (data.length < 4) continue;
             uint32 fnSel = uint32(bytes4(LibBytes.loadCalldata(data, 0x00)));
@@ -400,12 +402,14 @@ contract CircuitAccount is ERC7821 {
                 )
             );
         }
-        // Revoke all non-zero approvals that have been made, if there's a spend limit.
+        // Revoke all non-zero approvals that have been made.
+        // To prevent them from being used outside this guarded execute to bypass spend limits.
         for (uint256 i; i < t.approvedERC20s.length(); ++i) {
             address token = t.approvedERC20s.getAddress(i);
             SafeTransferLib.safeApprove(token, t.approvalSpenders.getAddress(i), 0);
         }
-        // Revoke all non-zero Permit2 direct approvals that have been made, if there's a spend limit.
+        // Revoke all non-zero Permit2 direct approvals that have been made.
+        // To prevent them from being used outside this guarded execute to bypass spend limits.
         for (uint256 i; i < t.permit2ERC20s.length(); ++i) {
             address token = t.permit2ERC20s.getAddress(i);
             SafeTransferLib.permit2Lockdown(token, t.permit2Spenders.getAddress(i));
@@ -436,7 +440,7 @@ contract CircuitAccount is ERC7821 {
         address store = $.activeSpendLimitsStore[spender];
         if (store == address(0)) return result;
         bytes memory buffer = SSTORE2.read(store);
-        result = new SpendState[](buffer.length / 21);
+        result = new SpendState[](buffer.length / 21); // Token: 20 bytes. SpendPeriod: 1 byte.
         unchecked {
             for (uint256 i; i != result.length; ++i) {
                 uint256 packed = uint168(bytes21(LibBytes.load(buffer, i * 21)));
