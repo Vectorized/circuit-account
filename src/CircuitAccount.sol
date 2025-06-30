@@ -509,6 +509,7 @@ contract CircuitAccount is ERC7821, ERC1271 {
 
     /// @dev Increments the spent amount and update the storage.
     function _incrementSpent(SpendState memory s, uint256 amount) internal virtual {
+        if (amount == uint256(0)) return;
         AccountStorage storage $ = _getAccountStorage();
         address spender = $.bot;
         uint256 current = startOfSpendPeriod(block.timestamp, s.period);
