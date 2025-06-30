@@ -5,6 +5,7 @@ import {LibBytes} from "solady/utils/LibBytes.sol";
 import {EfficientHashLib} from "solady/utils/EfficientHashLib.sol";
 import {FixedPointMathLib as Math} from "solady/utils/FixedPointMathLib.sol";
 import {DateTimeLib} from "solady/utils/DateTimeLib.sol";
+import {LibBit} from "solady/utils/LibBit.sol";
 import {LibZip} from "solady/utils/LibZip.sol";
 import {LibSort} from "solady/utils/LibSort.sol";
 import {SSTORE2} from "solady/utils/SSTORE2.sol";
@@ -293,7 +294,11 @@ contract CircuitAccount is ERC7821, ERC1271 {
     }
 
     /// @dev For ERC7821.
-    function _execute(Call[] calldata calls, bytes32) internal virtual override {
+    function _execute(bytes32, bytes calldata, Call[] calldata calls, bytes calldata)
+        internal
+        virtual
+        override
+    {
         AccountStorage storage $ = _getAccountStorage();
 
         if (msg.sender == address(this) || msg.sender == $.master) {
@@ -335,8 +340,6 @@ contract CircuitAccount is ERC7821, ERC1271 {
         uint256 totalNativeSpend;
         for (uint256 i; i < calls.length; ++i) {
             (address target, uint256 value, bytes calldata data) = _get(calls, i);
-            // Don't allow the bot to change the spend limits.
-            if (target == _DELEGATE_REGISTRY_V2) revert Unauthorized();
             if (value != 0) totalNativeSpend += value;
             if (data.length < 4) continue;
             uint32 fnSel = uint32(bytes4(LibBytes.loadCalldata(data, 0x00)));

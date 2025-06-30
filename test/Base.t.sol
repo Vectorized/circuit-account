@@ -8,6 +8,11 @@ import "./utils/mocks/MockCircuitAccountWithDelegateRegistry.sol";
 import "./utils/mocks/MockERC20.sol";
 
 contract BaseTest is SoladyTest {
+    bytes32 internal constant _ERC7821_BATCH_EXECUTION_MODE =
+        0x0100000000007821000100000000000000000000000000000000000000000000;
+
+    bytes32 internal constant _ERC7579_DELEGATE_CALL_MODE =
+        0xff00000000000000000000000000000000000000000000000000000000000000;
     address internal constant _DELEGATE_REGISTRY_V2 = 0x00000000000000447e69651d841bD8D104Bed493;
 
     MockCircuitAccount internal _mockCircuitAccountImplementation;
