@@ -15,7 +15,6 @@ import {ERC7821} from "solady/accounts/ERC7821.sol";
 import {ERC1271} from "solady/accounts/ERC1271.sol";
 import {ECDSA} from "solady/utils/ECDSA.sol";
 import {TokenTransferLib} from "./TokenTransferLib.sol";
-import {IDelegateRegistry} from "./IDelegateRegistry.sol";
 
 /// @title CircuitAccount
 /// @notice A simple 7702 delegation for agents.
@@ -250,11 +249,8 @@ contract CircuitAccount is ERC7821, ERC1271 {
             SpendConfig calldata c = configs[i];
             address token = c.token;
             SpendPeriod period = c.period;
-            IDelegateRegistry(_DELEGATE_REGISTRY_V2).delegateERC20(
-                spender, token, _getDelegateRegistryRights(period), c.limit
-            );
             uint256 packed = (uint256(uint160(token)) << 8) | uint8(period);
-            b.pUint168(uint168(packed));
+            b.pUint168(uint168(packed)).pUint256(c.limit);
             packedConfigs.set(i, packed);
             if (c.resetExisting) $.spends[_hash(spender, token, period)].clear();
         }
@@ -492,10 +488,12 @@ contract CircuitAccount is ERC7821, ERC1271 {
         address store = $.activeSpendLimitsStore[spender];
         if (store == address(0)) return result;
         bytes memory buffer = SSTORE2.read(store);
-        result = new SpendState[](buffer.length / 21); // Token: 20 bytes. SpendPeriod: 1 byte.
+        // Token: 20 bytes. SpendPeriod: 1 byte, Limit: 32 bytes.
+        result = new SpendState[](buffer.length / 53);
         unchecked {
             for (uint256 i; i != result.length; ++i) {
-                uint256 packed = uint168(bytes21(LibBytes.load(buffer, i * 21)));
+                uint256 o = i * 53;
+                uint256 packed = uint168(bytes21(LibBytes.load(buffer, o)));
                 SpendState memory s = result[i];
                 s.token = address(uint160(packed >> 8));
                 s.period = SpendPeriod(uint8(packed));
@@ -504,9 +502,7 @@ contract CircuitAccount is ERC7821, ERC1271 {
                     s.spent = uint256(LibBytes.load(c, 0x00));
                     s.lastUpdated = uint256(LibBytes.load(c, 0x20));
                 }
-                s.limit = IDelegateRegistry(_DELEGATE_REGISTRY_V2).checkDelegateForERC20(
-                    spender, address(this), s.token, _getDelegateRegistryRights(s.period)
-                );
+                s.limit = uint256(LibBytes.load(buffer, o + 21));
             }
         }
     }
