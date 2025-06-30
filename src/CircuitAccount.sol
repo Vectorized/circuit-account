@@ -366,6 +366,7 @@ contract CircuitAccount is ERC7821, ERC1271 {
         }
 
         // Sum transfer amounts, grouped by the ERC20s. In-place.
+        // `t.erc20s` will be sorted and unquified in ascending order.
         LibSort.groupSum(t.erc20s.data, t.transferAmounts.data);
 
         // Collect the ERC20 balances before the batch execution.
