@@ -12,6 +12,8 @@ import {DynamicBufferLib} from "solady/utils/DynamicBufferLib.sol";
 import {DynamicArrayLib} from "solady/utils/DynamicArrayLib.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 import {ERC7821} from "solady/accounts/ERC7821.sol";
+import {ERC1271} from "solady/accounts/ERC1271.sol";
+import {ECDSA} from "solady/utils/ECDSA.sol";
 import {TokenTransferLib} from "./TokenTransferLib.sol";
 import {IDelegateRegistry} from "./IDelegateRegistry.sol";
 
@@ -25,7 +27,7 @@ import {IDelegateRegistry} from "./IDelegateRegistry.sol";
 /// and willing to call this contract directly.
 /// For simplicity, this account does not depend on app-layer signatures.
 /// There's no EntryPoint, I love you.
-contract CircuitAccount is ERC7821 {
+contract CircuitAccount is ERC7821, ERC1271 {
     using DynamicBufferLib for *;
     using DynamicArrayLib for *;
     using LibBytes for LibBytes.BytesStorage;
@@ -421,6 +423,51 @@ contract CircuitAccount is ERC7821 {
         }
 
         $.isBotContext = false;
+    }
+
+    ////////////////////////////////////////////////////////////////////////
+    // ERC1271
+    ////////////////////////////////////////////////////////////////////////
+
+    /// @dev Validates the signature with ERC1271 return.
+    /// This enables the EOA to still verify regular ECDSA signatures if the contract
+    /// checks that it has code and calls this function instead of `ecrecover`.
+    function isValidSignature(bytes32 hash, bytes calldata signature)
+        public
+        view
+        virtual
+        override
+        returns (bytes4)
+    {
+        // If signature is valid for the EOA itself, success.
+        if (ECDSA.recoverCalldata(hash, signature) == address(this)) return msg.sig;
+        // We want to use the nested EIP712 logic to cater for the case where a single master
+        // can own multiple circuit accounts, such that signatures cannot be replayed,
+        // in case the 3rd party contracts don't hash the signer into the EIP712.
+        return ERC1271.isValidSignature(hash, signature);
+    }
+
+    /// @dev Returns the ERC1271 signer.
+    /// Override to return the signer `isValidSignature` checks against.
+    function _erc1271Signer() internal view virtual override returns (address) {
+        return master();
+    }
+
+    /// @dev For the EIP712, which is used in the ERC1271 nested EIP712 logic.
+    function _domainNameAndVersion()
+        internal
+        view
+        virtual
+        override
+        returns (string memory name, string memory version)
+    {
+        name = "CircuitAccount";
+        version = "0.0.1";
+    }
+
+    /// @dev In case we need to make this account upgradeable.
+    function _domainNameAndVersionMayChange() internal pure virtual override returns (bool) {
+        return true;
     }
 
     ////////////////////////////////////////////////////////////////////////
