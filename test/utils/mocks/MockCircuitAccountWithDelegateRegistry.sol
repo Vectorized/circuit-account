@@ -79,4 +79,22 @@ contract MockCircuitAccountWithDelegateRegistry is CircuitAccount, Brutalizer {
 
         $.activeSpendLimitsStore[spender] = SSTORE2.write(b.data);
     }
+
+    /// @dev Returns the `rights` for the delegate registry.
+    function _getDelegateRegistryRights(SpendPeriod period)
+        internal
+        pure
+        virtual
+        returns (bytes32)
+    {
+        // Instead of keccak256 hashes, we chose to use readable bytes32 short strings.
+        if (period == SpendPeriod.Minute) return "CIRCUIT_SPEND_PERIOD_MINUTE";
+        if (period == SpendPeriod.Hour) return "CIRCUIT_SPEND_PERIOD_HOUR";
+        if (period == SpendPeriod.Day) return "CIRCUIT_SPEND_PERIOD_DAY";
+        if (period == SpendPeriod.Week) return "CIRCUIT_SPEND_PERIOD_WEEK";
+        if (period == SpendPeriod.Month) return "CIRCUIT_SPEND_PERIOD_MONTH";
+        if (period == SpendPeriod.Year) return "CIRCUIT_SPEND_PERIOD_YEAR";
+        if (period == SpendPeriod.Forever) return "CIRCUIT_SPEND_PERIOD_FOREVER";
+        revert();
+    }
 }
