@@ -348,6 +348,15 @@ contract CircuitAccount is ERC7821, ERC1271 {
                 t.erc20s.p(target);
                 t.transferAmounts.p(LibBytes.loadCalldata(data, 0x24)); // `amount`.
             }
+            // `transferFrom(address,uint256)`.
+            // The account may have existing ERC20 allowances. If `transferFrom` is
+            // used to transfer to an account that is not this, consider it as spending.
+            if (fnSel == 0x01c6adc3) {
+                if (address(bytes20(LibBytes.loadCalldata(data, 0x04))) == address(this)) continue;
+                if (LibBytes.loadCalldata(data, 0x44) == 0) continue; // `amount == 0`.
+                t.erc20s.p(target);
+                t.transferAmounts.p(LibBytes.loadCalldata(data, 0x44)); // `amount`.
+            }
             // `approve(address,uint256)`.
             // We have to revoke any new approvals after the batch, else a bad app can
             // leave an approval to let them drain unlimited tokens after the batch.
