@@ -5,6 +5,7 @@ import {LibBytes} from "solady/utils/LibBytes.sol";
 import {EfficientHashLib} from "solady/utils/EfficientHashLib.sol";
 import {FixedPointMathLib as Math} from "solady/utils/FixedPointMathLib.sol";
 import {DateTimeLib} from "solady/utils/DateTimeLib.sol";
+import {LibBit} from "solady/utils/LibBit.sol";
 import {LibZip} from "solady/utils/LibZip.sol";
 import {LibSort} from "solady/utils/LibSort.sol";
 import {SSTORE2} from "solady/utils/SSTORE2.sol";
@@ -12,8 +13,9 @@ import {DynamicBufferLib} from "solady/utils/DynamicBufferLib.sol";
 import {DynamicArrayLib} from "solady/utils/DynamicArrayLib.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 import {ERC7821} from "solady/accounts/ERC7821.sol";
+import {ERC1271} from "solady/accounts/ERC1271.sol";
+import {ECDSA} from "solady/utils/ECDSA.sol";
 import {TokenTransferLib} from "./TokenTransferLib.sol";
-import {IDelegateRegistry} from "./IDelegateRegistry.sol";
 
 /// @title CircuitAccount
 /// @notice A simple 7702 delegation for agents.
@@ -25,7 +27,7 @@ import {IDelegateRegistry} from "./IDelegateRegistry.sol";
 /// and willing to call this contract directly.
 /// For simplicity, this account does not depend on app-layer signatures.
 /// There's no EntryPoint, I love you.
-contract CircuitAccount is ERC7821 {
+contract CircuitAccount is ERC7821, ERC1271 {
     using DynamicBufferLib for *;
     using DynamicArrayLib for *;
     using LibBytes for LibBytes.BytesStorage;
@@ -248,11 +250,8 @@ contract CircuitAccount is ERC7821 {
             SpendConfig calldata c = configs[i];
             address token = c.token;
             SpendPeriod period = c.period;
-            IDelegateRegistry(_DELEGATE_REGISTRY_V2).delegateERC20(
-                spender, token, _getDelegateRegistryRights(period), c.limit
-            );
             uint256 packed = (uint256(uint160(token)) << 8) | uint8(period);
-            b.pUint168(uint168(packed));
+            b.pUint168(uint168(packed)).pUint256(c.limit);
             packedConfigs.set(i, packed);
             if (c.resetExisting) $.spends[_hash(spender, token, period)].clear();
         }
@@ -295,7 +294,11 @@ contract CircuitAccount is ERC7821 {
     }
 
     /// @dev For ERC7821.
-    function _execute(Call[] calldata calls, bytes32) internal virtual override {
+    function _execute(bytes32, bytes calldata, Call[] calldata calls, bytes calldata)
+        internal
+        virtual
+        override
+    {
         AccountStorage storage $ = _getAccountStorage();
 
         if (msg.sender == address(this) || msg.sender == $.master) {
@@ -337,8 +340,6 @@ contract CircuitAccount is ERC7821 {
         uint256 totalNativeSpend;
         for (uint256 i; i < calls.length; ++i) {
             (address target, uint256 value, bytes calldata data) = _get(calls, i);
-            // Don't allow the bot to change the spend limits.
-            if (target == _DELEGATE_REGISTRY_V2) revert Unauthorized();
             if (value != 0) totalNativeSpend += value;
             if (data.length < 4) continue;
             uint32 fnSel = uint32(bytes4(LibBytes.loadCalldata(data, 0x00)));
@@ -368,6 +369,7 @@ contract CircuitAccount is ERC7821 {
         }
 
         // Sum transfer amounts, grouped by the ERC20s. In-place.
+        // `t.erc20s` will be sorted and unquified in ascending order.
         LibSort.groupSum(t.erc20s.data, t.transferAmounts.data);
 
         // Collect the ERC20 balances before the batch execution.
@@ -424,6 +426,51 @@ contract CircuitAccount is ERC7821 {
     }
 
     ////////////////////////////////////////////////////////////////////////
+    // ERC1271
+    ////////////////////////////////////////////////////////////////////////
+
+    /// @dev Validates the signature with ERC1271 return.
+    /// This enables the EOA to still verify regular ECDSA signatures if the contract
+    /// checks that it has code and calls this function instead of `ecrecover`.
+    function isValidSignature(bytes32 hash, bytes calldata signature)
+        public
+        view
+        virtual
+        override
+        returns (bytes4)
+    {
+        // If signature is valid for the EOA itself, success.
+        if (ECDSA.recoverCalldata(hash, signature) == address(this)) return msg.sig;
+        // We want to use the nested EIP712 logic to cater for the case where a single master
+        // can own multiple circuit accounts, such that signatures cannot be replayed,
+        // in case the 3rd party contracts don't hash the signer into the EIP712.
+        return ERC1271.isValidSignature(hash, signature);
+    }
+
+    /// @dev Returns the ERC1271 signer.
+    /// Override to return the signer `isValidSignature` checks against.
+    function _erc1271Signer() internal view virtual override returns (address) {
+        return master();
+    }
+
+    /// @dev For the EIP712, which is used in the ERC1271 nested EIP712 logic.
+    function _domainNameAndVersion()
+        internal
+        view
+        virtual
+        override
+        returns (string memory name, string memory version)
+    {
+        name = "CircuitAccount";
+        version = "0.0.1";
+    }
+
+    /// @dev In case we need to make this account upgradeable.
+    function _domainNameAndVersionMayChange() internal pure virtual override returns (bool) {
+        return true;
+    }
+
+    ////////////////////////////////////////////////////////////////////////
     // Internal helpers
     ////////////////////////////////////////////////////////////////////////
 
@@ -445,10 +492,12 @@ contract CircuitAccount is ERC7821 {
         address store = $.activeSpendLimitsStore[spender];
         if (store == address(0)) return result;
         bytes memory buffer = SSTORE2.read(store);
-        result = new SpendState[](buffer.length / 21); // Token: 20 bytes. SpendPeriod: 1 byte.
+        // Token: 20 bytes. SpendPeriod: 1 byte, Limit: 32 bytes.
+        result = new SpendState[](buffer.length / 53);
         unchecked {
             for (uint256 i; i != result.length; ++i) {
-                uint256 packed = uint168(bytes21(LibBytes.load(buffer, i * 21)));
+                uint256 o = i * 53;
+                uint256 packed = uint168(bytes21(LibBytes.load(buffer, o)));
                 SpendState memory s = result[i];
                 s.token = address(uint160(packed >> 8));
                 s.period = SpendPeriod(uint8(packed));
@@ -457,15 +506,14 @@ contract CircuitAccount is ERC7821 {
                     s.spent = uint256(LibBytes.load(c, 0x00));
                     s.lastUpdated = uint256(LibBytes.load(c, 0x20));
                 }
-                s.limit = IDelegateRegistry(_DELEGATE_REGISTRY_V2).checkDelegateForERC20(
-                    spender, address(this), s.token, _getDelegateRegistryRights(s.period)
-                );
+                s.limit = uint256(LibBytes.load(buffer, o + 21));
             }
         }
     }
 
     /// @dev Increments the spent amount and update the storage.
     function _incrementSpent(SpendState memory s, uint256 amount) internal virtual {
+        if (amount == uint256(0)) return;
         AccountStorage storage $ = _getAccountStorage();
         address spender = $.bot;
         uint256 current = startOfSpendPeriod(block.timestamp, s.period);
@@ -492,23 +540,5 @@ contract CircuitAccount is ERC7821 {
             mstore(0x00, spender)
             result := keccak256(0x0c, 0x29)
         }
-    }
-
-    /// @dev Returns the `rights` for the delegate registry.
-    function _getDelegateRegistryRights(SpendPeriod period)
-        internal
-        pure
-        virtual
-        returns (bytes32)
-    {
-        // Instead of keccak256 hashes, we chose to use readable bytes32 short strings.
-        if (period == SpendPeriod.Minute) return "CIRCUIT_SPEND_PERIOD_MINUTE";
-        if (period == SpendPeriod.Hour) return "CIRCUIT_SPEND_PERIOD_HOUR";
-        if (period == SpendPeriod.Day) return "CIRCUIT_SPEND_PERIOD_DAY";
-        if (period == SpendPeriod.Week) return "CIRCUIT_SPEND_PERIOD_WEEK";
-        if (period == SpendPeriod.Month) return "CIRCUIT_SPEND_PERIOD_MONTH";
-        if (period == SpendPeriod.Year) return "CIRCUIT_SPEND_PERIOD_YEAR";
-        if (period == SpendPeriod.Forever) return "CIRCUIT_SPEND_PERIOD_FOREVER";
-        revert();
     }
 }
