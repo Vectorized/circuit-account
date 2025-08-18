@@ -367,7 +367,7 @@ contract CircuitAccount is ERC7821, ERC1271 {
                 if (LibBytes.loadCalldata(data, 0x44) == 0) continue; // `amount == 0`.
                 t.permit2ERC20s.p(LibBytes.loadCalldata(data, 0x04).lsbToAddress()); // `token`.
                 t.permit2Spenders.p(LibBytes.loadCalldata(data, 0x24).lsbToAddress()); // `spender`.
-                t.erc20s.p(target); // `token`.
+                t.erc20s.p(LibBytes.loadCalldata(data, 0x04).lsbToAddress()); // `token`.
                 t.transferAmounts.p(LibBytes.loadCalldata(data, 0x44)); // `amount`.
             }
             // `transferFrom(address,address,uint256)`.
