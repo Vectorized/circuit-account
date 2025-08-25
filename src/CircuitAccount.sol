@@ -15,7 +15,9 @@ import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 import {ERC7821} from "solady/accounts/ERC7821.sol";
 import {ERC1271} from "solady/accounts/ERC1271.sol";
 import {ECDSA} from "solady/utils/ECDSA.sol";
+import {LibStorage} from "solady/utils/LibStorage.sol";
 import {TokenTransferLib} from "./TokenTransferLib.sol";
+import {LibNonce} from "./LibNonce.sol";
 
 /// @title CircuitAccount
 /// @notice A simple 7702 delegation for agents.
@@ -28,6 +30,7 @@ import {TokenTransferLib} from "./TokenTransferLib.sol";
 /// For simplicity, this account does not depend on app-layer signatures.
 /// There's no EntryPoint, I love you.
 contract CircuitAccount is ERC7821, ERC1271 {
+    using EfficientHashLib for bytes32[];
     using DynamicBufferLib for *;
     using DynamicArrayLib for *;
     using LibBytes for *;
@@ -115,6 +118,13 @@ contract CircuitAccount is ERC7821, ERC1271 {
         mapping(address => address) activeSpendLimitsStore;
         /// @dev Mapping of `<bot,token,period>` to the encoded spends.
         mapping(bytes32 => LibBytes.BytesStorage) spends;
+        /// @dev Mapping for 4337-style 2D nonce sequences.
+        /// Each nonce has the following bit layout:
+        /// - Upper 192 bits are used for the `seqKey` (sequence key).
+        ///   The upper 16 bits of the `seqKey` is `MULTICHAIN_NONCE_PREFIX`,
+        ///   then the Intent EIP-712 hash will exclude the chain ID.
+        /// - Lower 64 bits are used for the sequential nonce corresponding to the `seqKey`.
+        mapping(uint192 => LibStorage.Ref) nonceSeqs;
     }
 
     /// @dev Returns the storage pointer.
@@ -151,12 +161,35 @@ contract CircuitAccount is ERC7821, ERC1271 {
     /// @dev Exceeded the spend limit of `token`.
     error ExceededSpendLimit(address token);
 
+    /// @dev Failed to decode `opData`.
+    error OpDataError();
+
+    ////////////////////////////////////////////////////////////////////////
+    // Events
+    ////////////////////////////////////////////////////////////////////////
+
+    /// @dev The nonce sequence of is invalidated up to (inclusive) of `nonce`.
+    /// The new available nonce will be `nonce + 1`.
+    event NonceInvalidated(uint256 nonce);
+
     ////////////////////////////////////////////////////////////////////////
     // Constants
     ////////////////////////////////////////////////////////////////////////
 
-    /// @dev Address of the delegate registry.
-    address internal constant _DELEGATE_REGISTRY_V2 = 0x00000000000000447e69651d841bD8D104Bed493;
+    /// @dev For EIP712 signature digest calculation for the `execute` function.
+    bytes32 public constant EXECUTE_TYPEHASH = keccak256(
+        "Execute(bool multichain,Call[] calls,uint256 nonce)Call(address to,uint256 value,bytes data)"
+    );
+
+    /// @dev For EIP712 signature digest calculation for the `execute` function.
+    bytes32 public constant CALL_TYPEHASH = keccak256("Call(address to,uint256 value,bytes data)");
+
+    /// @dev For EIP712 signature digest calculation.
+    bytes32 public constant DOMAIN_TYPEHASH = _DOMAIN_TYPEHASH;
+
+    /// @dev Nonce prefix to signal that the payload is to be signed with EIP-712 without the chain ID.
+    /// This constant is a pun for "chain ID 0".
+    uint16 public constant MULTICHAIN_NONCE_PREFIX = 0xc1d0;
 
     /// @dev The canonical Permit2 address.
     address internal constant _PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
@@ -294,7 +327,7 @@ contract CircuitAccount is ERC7821, ERC1271 {
     }
 
     /// @dev For ERC7821.
-    function _execute(bytes32, bytes calldata, Call[] calldata calls, bytes calldata)
+    function _execute(bytes32, bytes calldata, Call[] calldata calls, bytes calldata opData)
         internal
         virtual
         override
@@ -303,12 +336,25 @@ contract CircuitAccount is ERC7821, ERC1271 {
 
         if (msg.sender == address(this) || msg.sender == $.master) {
             if ($.isBotContext) revert Unauthorized();
-            ERC7821._execute(calls, bytes32(0));
-        } else if (msg.sender == $.bot) {
-            _botExecute(calls);
-        } else {
-            revert Unauthorized();
+            return ERC7821._execute(calls, bytes32(0));
         }
+        if (msg.sender == $.bot) {
+            return _botExecute(calls);
+        }
+
+        // Workflow with `opData`.
+        if (opData.length < 0x20) revert OpDataError();
+        uint256 nonce = uint256(LibBytes.loadCalldata(opData, 0x00));
+        LibNonce.checkAndIncrement(_getAccountStorage().nonceSeqs, nonce);
+        emit NonceInvalidated(nonce);
+
+        bytes32 digest = computeDigest(calls, nonce);
+        bytes calldata sig = LibBytes.sliceCalldata(opData, 0x20);
+        if (isValidSignature(digest, sig) == this.isValidSignature.selector) {
+            return ERC7821._execute(calls, bytes32(0));
+        }
+
+        revert Unauthorized();
     }
 
     /// @dev Special execute workflow for bots.
@@ -440,8 +486,38 @@ contract CircuitAccount is ERC7821, ERC1271 {
     }
 
     ////////////////////////////////////////////////////////////////////////
-    // ERC1271
+    // Signatures
     ////////////////////////////////////////////////////////////////////////
+
+    /// @dev Computes the EIP712 digest for `calls`.
+    /// If the the nonce starts with `MULTICHAIN_NONCE_PREFIX`,
+    /// the digest will be computed without the chain ID.
+    /// Otherwise, the digest will be computed with the chain ID.
+    function computeDigest(Call[] calldata calls, uint256 nonce)
+        public
+        view
+        virtual
+        returns (bytes32 result)
+    {
+        bytes32[] memory a = EfficientHashLib.malloc(calls.length);
+        for (uint256 i; i < calls.length; ++i) {
+            (address target, uint256 value, bytes calldata data) = _get(calls, i);
+            a.set(
+                i,
+                EfficientHashLib.hash(
+                    CALL_TYPEHASH,
+                    bytes32(uint256(uint160(target))),
+                    bytes32(value),
+                    EfficientHashLib.hashCalldata(data)
+                )
+            );
+        }
+        bool isMultichain = nonce >> 240 == MULTICHAIN_NONCE_PREFIX;
+        bytes32 structHash = EfficientHashLib.hash(
+            uint256(EXECUTE_TYPEHASH), LibBit.toUint(isMultichain), uint256(a.hash()), nonce
+        );
+        return isMultichain ? _hashTypedDataSansChainId(structHash) : _hashTypedData(structHash);
+    }
 
     /// @dev Validates the signature with ERC1271 return.
     /// This enables the EOA to still verify regular ECDSA signatures if the contract
