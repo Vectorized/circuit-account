@@ -11,6 +11,8 @@ contract MockCircuitAccountWithDelegateRegistry is CircuitAccount, Brutalizer {
     using LibBytes for LibBytes.BytesStorage;
     using LibZip for *;
 
+    address internal constant _DELEGATE_REGISTRY_V2 = 0x00000000000000447e69651d841bD8D104Bed493;
+
     function hash(address spender, address token, SpendPeriod period)
         public
         view
